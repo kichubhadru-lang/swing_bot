@@ -450,9 +450,8 @@ def update_trade_journal(final):
             ""
         ]
 
-    journal.to_csv(TRADE_FILE,index=False)
-
-def main():
+    journal.to_csv(TRADE_FILE,index=False
+    def main():
     scanner, final = run_scanner()
 
     print("Stocks analyzed:", len(scanner))
@@ -461,7 +460,7 @@ def main():
     message = format_signals(final)
     send_telegram(message)
 
-update_trade_journal(final)
+    update_trade_journal(final)
 
     save_reports(scanner, final)
 
