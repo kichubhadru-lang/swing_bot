@@ -450,7 +450,7 @@ def update_trade_journal(final):
             ""
         ]
 
-    journal.to_csv(TRADE_FILE,index=False
+    journal.to_csv(TRADE_FILE,index=False)
     def main():
     scanner, final = run_scanner()
 
