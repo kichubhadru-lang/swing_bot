@@ -68,9 +68,9 @@ def download_benchmark():
 
     return benchmark
     def add_indicators(df):
-    try:
-        if df is None or len(df) < 220:
-            return None
+        try:
+            if df is None or len(df) < 220:
+                return None
 
         df = df.copy()
 
