@@ -26,6 +26,7 @@ TRADE_FILE = "trade_journal.csv"
 
 
 def clean_data(df):
+    
     if df is None or df.empty:
         return None
 
@@ -404,3 +405,69 @@ def portfolio_monitor():
 
     save_trade_journal(journal)
     return msg
+    def run_scanner():
+    print("Starting Nifty 500 scanner...")
+
+    symbols = get_nifty500_symbols()
+    benchmark = download_benchmark()
+    benchmark = add_indicators(benchmark)
+
+    results = []
+
+    for i, symbol in enumerate(symbols):
+        result = analyze_stock(symbol, benchmark)
+
+        if result is not None:
+            results.append(result)
+
+        if (i + 1) % 50 == 0:
+            print("Scanned", i + 1)
+
+    scanner = pd.DataFrame(results)
+
+    if scanner.empty:
+        return scanner, pd.DataFrame()
+
+    scanner["Grade"] = scanner["Score"].apply(grade_stock)
+
+    scanner = scanner.sort_values(
+        ["Score", "RS %"],
+        ascending=False
+    )
+
+    final = scanner[
+        scanner["Score"] >= MIN_SCORE
+    ].head(MAX_POSITIONS)
+
+    return scanner, final
+
+
+def save_reports(scanner, final):
+    today = datetime.now().strftime("%Y%m%d")
+
+    if not scanner.empty:
+        scanner.to_csv(f"scanner_{today}.csv", index=False)
+
+    if not final.empty:
+        final.to_csv(f"signals_{today}.csv", index=False)
+
+
+def main():
+    scanner, final = run_scanner()
+
+    print("Stocks analyzed:", len(scanner))
+    print("Signals found:", len(final))
+
+    signal_msg = format_signals(final)
+    send_telegram(signal_msg)
+
+    portfolio_msg = portfolio_monitor()
+    send_telegram(portfolio_msg)
+
+    save_reports(scanner, final)
+
+    print("Done")
+
+
+if __name__ == "__main__":
+    main()
