@@ -23,7 +23,6 @@ MAX_ALLOCATION = 0.30
 MIN_SCORE = 65
 
 NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-TRADE_FILE = "trade_journal.csv"
 
 
 def send_telegram(message):
@@ -34,6 +33,7 @@ def send_telegram(message):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
+
     response = requests.post(url, json=payload, timeout=30)
 
     print("Telegram status:", response.status_code)
@@ -44,19 +44,11 @@ def get_groww_client():
     try:
         from growwapi import GrowwAPI
 
-        token = GROWW_ACCESS_TOKEN
-
-        if not token and GROWW_API_KEY and GROWW_API_SECRET:
-            token = GrowwAPI.get_access_token(
-                api_key=GROWW_API_KEY,
-                secret=GROWW_API_SECRET
-            )
-
-        if not token:
-            print("Groww token missing")
+        if not GROWW_ACCESS_TOKEN:
+            print("Groww access token missing")
             return None
 
-        return GrowwAPI(token)
+        return GrowwAPI(GROWW_ACCESS_TOKEN)
 
     except Exception as e:
         print("Groww login error:", e)
@@ -101,9 +93,11 @@ def get_broker_holdings():
         return [], None
 
     try:
-        holdings = client.get_holdings_for_user(timeout=10)
+        holdings = client.get_holdings_for_user()
         symbols = extract_symbols_from_groww(holdings)
+
         print("Groww holdings:", symbols)
+
         return symbols, holdings
 
     except Exception as e:
@@ -135,6 +129,7 @@ def download_stock(symbol, period="1y", interval="1d"):
             progress=False,
             auto_adjust=False
         )
+
         return clean_data(df)
 
     except Exception as e:
@@ -446,6 +441,70 @@ def run_scanner(exclude_symbols=None):
     return scanner, final
 
 
+def download_last_close(symbol):
+    df = download_stock(symbol, period="6mo", interval="1d")
+
+    if df is None or len(df) < 5:
+        return None
+
+    current = float(df["Close"].iloc[-1])
+    previous = float(df["Close"].iloc[-2])
+    change_pct = ((current - previous) / previous) * 100
+
+    return {
+        "symbol": symbol,
+        "current": round(current, 2),
+        "change_pct": round(change_pct, 2)
+    }
+
+
+def market_brief():
+    items = {
+        "Nifty 50": "^NSEI",
+        "Bank Nifty": "^NSEBANK",
+        "India VIX": "^INDIAVIX",
+        "USD/INR": "INR=X",
+        "Crude Oil": "CL=F",
+        "Gold": "GC=F",
+        "S&P 500": "^GSPC",
+        "Nasdaq": "^IXIC"
+    }
+
+    msg = "📰 DAILY MARKET BRIEF\n\n"
+
+    for name, symbol in items.items():
+        data = download_last_close(symbol)
+
+        if data is None:
+            continue
+
+        emoji = "🟢" if data["change_pct"] >= 0 else "🔴"
+
+        msg += (
+            f"{emoji} {name}: {data['current']} "
+            f"({data['change_pct']}%)\n"
+        )
+
+    nifty = download_stock("^NSEI", period="1y", interval="1d")
+    nifty = add_indicators(nifty)
+
+    if nifty is not None and not nifty.empty:
+        latest = nifty.iloc[-1]
+
+        if latest["Close"] > latest["EMA200"] and latest["EMA20"] > latest["EMA50"]:
+            mood = "🟢 Bullish"
+        elif latest["Close"] > latest["EMA200"]:
+            mood = "🟡 Neutral"
+        else:
+            mood = "🔴 Weak"
+
+        msg += f"\nMarket Mood: {mood}\n"
+
+    msg += "\nSignals will follow below."
+
+    return msg
+
+
 def format_signals(final, broker_holdings):
     today = datetime.now().strftime("%d-%b-%Y")
 
@@ -498,6 +557,9 @@ def save_reports(scanner, final):
 
 
 def main():
+    brief = market_brief()
+    send_telegram(brief)
+
     broker_holdings, raw_holdings = get_broker_holdings()
 
     scanner, final = run_scanner(exclude_symbols=broker_holdings)
