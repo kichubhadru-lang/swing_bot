@@ -277,3 +277,130 @@ def analyze_stock(symbol, benchmark_df):
 
     except Exception:
         return None
+        def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("BOT_TOKEN or CHAT_ID missing")
+        print(message)
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+
+    r = requests.post(url, json=payload)
+    print(r.status_code)
+    print(r.text[:300])
+
+
+def format_signals(final):
+    today = datetime.now().strftime("%d-%b-%Y")
+
+    msg = f"🏆 NIFTY 500 SWING SIGNALS\n\n📅 Date: {today}\n✅ Signals Found: {len(final)}\n\n"
+
+    if final.empty:
+        msg += "No high-quality setups today."
+        return msg
+
+    final = final.reset_index(drop=True)
+
+    for i, row in final.iterrows():
+        msg += (
+            f"{i+1}. {row['Symbol']} — {row['Grade']}\n\n"
+            f"Score: {row['Score']}/100\n"
+            f"Entry: ₹{row['Entry']}\n"
+            f"SL: ₹{row['Stop Loss']}\n"
+            f"Target: ₹{row['Target']}\n"
+            f"Qty: {row['Quantity']}\n"
+            f"Capital: ₹{round(row['Capital Required'])}\n"
+            f"RS: {row['RS %']}%\n"
+            f"Reasons: {row['Reasons']}\n\n"
+            "--------------------\n\n"
+        )
+
+    msg += "⚠️ Educational use only. Confirm manually before trading."
+    return msg
+
+
+def load_trade_journal():
+    if os.path.exists(TRADE_FILE):
+        return pd.read_csv(TRADE_FILE)
+
+    df = pd.DataFrame(columns=[
+        "Date", "Symbol", "Buy Price", "Quantity",
+        "Stop Loss", "Target", "Status", "Exit Price", "PnL"
+    ])
+
+    df.to_csv(TRADE_FILE, index=False)
+    return df
+
+
+def save_trade_journal(df):
+    df.to_csv(TRADE_FILE, index=False)
+
+
+def get_open_symbols():
+    journal = load_trade_journal()
+
+    if journal.empty:
+        return []
+
+    return journal[journal["Status"] == "Open"]["Symbol"].tolist()
+
+
+def portfolio_monitor():
+    journal = load_trade_journal()
+    open_trades = journal[journal["Status"] == "Open"].copy()
+
+    if open_trades.empty:
+        return "📊 PORTFOLIO UPDATE\n\nNo open trades."
+
+    msg = "📊 PORTFOLIO UPDATE\n\n"
+
+    for idx, row in open_trades.iterrows():
+        symbol = row["Symbol"]
+        entry = float(row["Buy Price"])
+        qty = int(row["Quantity"])
+        stop = float(row["Stop Loss"])
+        target = float(row["Target"])
+
+        df = download_stock(symbol)
+
+        if df is None or df.empty:
+            continue
+
+        current = float(df["Close"].iloc[-1])
+        pnl = (current - entry) * qty
+        pnl_pct = ((current - entry) / entry) * 100
+        halfway = entry + ((target - entry) / 2)
+
+        if current >= target:
+            status = "🎯 TARGET HIT - Book Profit"
+            journal.loc[idx, "Status"] = "Closed"
+            journal.loc[idx, "Exit Price"] = target
+            journal.loc[idx, "PnL"] = round((target - entry) * qty, 2)
+
+        elif current <= stop:
+            status = "🛑 STOP LOSS HIT - Exit"
+            journal.loc[idx, "Status"] = "Closed"
+            journal.loc[idx, "Exit Price"] = stop
+            journal.loc[idx, "PnL"] = round((stop - entry) * qty, 2)
+
+        elif current >= halfway:
+            status = "🔁 HOLD - Move SL to breakeven"
+
+        else:
+            status = "⏳ HOLD"
+
+        msg += (
+            f"{symbol}\n"
+            f"Entry: ₹{entry}\n"
+            f"Current: ₹{round(current, 2)}\n"
+            f"Target: ₹{target}\n"
+            f"SL: ₹{stop}\n"
+            f"Qty: {qty}\n"
+            f"P/L: ₹{round(pnl, 2)} ({round(pnl_pct, 2)}%)\n"
+            f"Status: {status}\n\n"
+            "--------------------\n\n"
+        )
+
+    save_trade_journal(journal)
+    return msg
