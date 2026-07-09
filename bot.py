@@ -460,6 +460,10 @@ def main():
 
     message = format_signals(final)
     send_telegram(message)
+message = format_signals(final)
+send_telegram(message)
+
+update_trade_journal(final)
 
     save_reports(scanner, final)
 
