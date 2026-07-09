@@ -1,6 +1,5 @@
 import os
 import requests
-import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
@@ -12,6 +11,10 @@ from ta.volatility import AverageTrueRange
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+GROWW_ACCESS_TOKEN = os.getenv("GROWW_ACCESS_TOKEN")
+GROWW_API_KEY = os.getenv("GROWW_API_KEY")
+GROWW_API_SECRET = os.getenv("GROWW_API_SECRET")
 
 CAPITAL = 100000
 RISK_PER_TRADE = 0.01
@@ -31,11 +34,81 @@ def send_telegram(message):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
-
     response = requests.post(url, json=payload, timeout=30)
 
     print("Telegram status:", response.status_code)
     print(response.text[:300])
+
+
+def get_groww_client():
+    try:
+        from growwapi import GrowwAPI
+
+        token = GROWW_ACCESS_TOKEN
+
+        if not token and GROWW_API_KEY and GROWW_API_SECRET:
+            token = GrowwAPI.get_access_token(
+                api_key=GROWW_API_KEY,
+                secret=GROWW_API_SECRET
+            )
+
+        if not token:
+            print("Groww token missing")
+            return None
+
+        return GrowwAPI(token)
+
+    except Exception as e:
+        print("Groww login error:", e)
+        return None
+
+
+def extract_symbols_from_groww(data):
+    symbols = set()
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                k = str(key).lower()
+
+                if k in [
+                    "trading_symbol",
+                    "tradingsymbol",
+                    "symbol",
+                    "nse_symbol",
+                    "company_symbol"
+                ]:
+                    if value:
+                        s = str(value).strip()
+                        if s and not s.endswith(".NS"):
+                            s = s + ".NS"
+                        symbols.add(s)
+
+                walk(value)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
+    return sorted(symbols)
+
+
+def get_broker_holdings():
+    client = get_groww_client()
+
+    if client is None:
+        return [], None
+
+    try:
+        holdings = client.get_holdings_for_user(timeout=10)
+        symbols = extract_symbols_from_groww(holdings)
+        print("Groww holdings:", symbols)
+        return symbols, holdings
+
+    except Exception as e:
+        print("Groww holdings error:", e)
+        return [], None
 
 
 def clean_data(df):
@@ -62,7 +135,6 @@ def download_stock(symbol, period="1y", interval="1d"):
             progress=False,
             auto_adjust=False
         )
-
         return clean_data(df)
 
     except Exception as e:
@@ -328,8 +400,11 @@ def analyze_stock(symbol, benchmark_df):
         return None
 
 
-def run_scanner():
+def run_scanner(exclude_symbols=None):
     print("Starting Nifty 500 scanner...")
+
+    if exclude_symbols is None:
+        exclude_symbols = []
 
     symbols = get_nifty500_symbols()
 
@@ -343,6 +418,9 @@ def run_scanner():
     results = []
 
     for i, symbol in enumerate(symbols):
+        if symbol in exclude_symbols:
+            continue
+
         result = analyze_stock(symbol, benchmark)
 
         if result is not None:
@@ -368,17 +446,24 @@ def run_scanner():
     return scanner, final
 
 
-def format_signals(final):
+def format_signals(final, broker_holdings):
     today = datetime.now().strftime("%d-%b-%Y")
 
     msg = (
         "🏆 NIFTY 500 SWING SIGNALS V3\n\n"
         f"📅 Date: {today}\n"
+        f"📌 Broker Holdings Detected: {len(broker_holdings)}\n"
         f"✅ Signals Found: {len(final)}\n\n"
     )
 
+    if broker_holdings:
+        msg += "Current Holdings:\n"
+        for symbol in broker_holdings:
+            msg += f"• {symbol}\n"
+        msg += "\n"
+
     if final.empty:
-        msg += "No high-quality setups today."
+        msg += "No new high-quality setups today."
         return msg
 
     for i, row in final.iterrows():
@@ -400,134 +485,6 @@ def format_signals(final):
     return msg
 
 
-def load_trade_journal():
-    if os.path.exists(TRADE_FILE):
-        return pd.read_csv(TRADE_FILE)
-
-    journal = pd.DataFrame(columns=[
-        "Date",
-        "Symbol",
-        "Buy Price",
-        "Quantity",
-        "Stop Loss",
-        "Target",
-        "Status",
-        "Exit Price",
-        "PnL"
-    ])
-
-    journal.to_csv(TRADE_FILE, index=False)
-    return journal
-
-
-def update_trade_journal(final):
-    journal = load_trade_journal()
-
-    if final.empty:
-        journal.to_csv(TRADE_FILE, index=False)
-        return
-
-    if journal.empty:
-        open_symbols = []
-    else:
-        open_symbols = journal[
-            journal["Status"] == "Open"
-        ]["Symbol"].tolist()
-
-    added = 0
-
-    for _, row in final.iterrows():
-        if row["Symbol"] in open_symbols:
-            continue
-
-        journal.loc[len(journal)] = [
-            datetime.now().strftime("%Y-%m-%d"),
-            row["Symbol"],
-            row["Entry"],
-            row["Quantity"],
-            row["Stop Loss"],
-            row["Target"],
-            "Open",
-            "",
-            ""
-        ]
-
-        added += 1
-
-    journal.to_csv(TRADE_FILE, index=False)
-
-    print("Trades added to journal:", added)
-
-
-def portfolio_monitor():
-    journal = load_trade_journal()
-
-    if journal.empty:
-        return "📊 PORTFOLIO UPDATE\n\nNo open trades."
-
-    open_trades = journal[journal["Status"] == "Open"].copy()
-
-    if open_trades.empty:
-        return "📊 PORTFOLIO UPDATE\n\nNo open trades."
-
-    msg = "📊 PORTFOLIO UPDATE\n\n"
-
-    for idx, row in open_trades.iterrows():
-        try:
-            symbol = row["Symbol"]
-            entry = float(row["Buy Price"])
-            qty = int(row["Quantity"])
-            stop = float(row["Stop Loss"])
-            target = float(row["Target"])
-
-            df = download_stock(symbol)
-
-            if df is None or df.empty:
-                continue
-
-            current = float(df["Close"].iloc[-1])
-            pnl = (current - entry) * qty
-            pnl_pct = ((current - entry) / entry) * 100
-            halfway = entry + ((target - entry) / 2)
-
-            if current >= target:
-                status = "🎯 TARGET HIT - Book Profit"
-                journal.loc[idx, "Status"] = "Closed"
-                journal.loc[idx, "Exit Price"] = target
-                journal.loc[idx, "PnL"] = round((target - entry) * qty, 2)
-
-            elif current <= stop:
-                status = "🛑 STOP LOSS HIT - Exit"
-                journal.loc[idx, "Status"] = "Closed"
-                journal.loc[idx, "Exit Price"] = stop
-                journal.loc[idx, "PnL"] = round((stop - entry) * qty, 2)
-
-            elif current >= halfway:
-                status = "🔁 HOLD - Move SL to breakeven"
-
-            else:
-                status = "⏳ HOLD"
-
-            msg += (
-                f"{symbol}\n"
-                f"Entry: ₹{entry}\n"
-                f"Current: ₹{round(current, 2)}\n"
-                f"Target: ₹{target}\n"
-                f"SL: ₹{stop}\n"
-                f"Qty: {qty}\n"
-                f"P/L: ₹{round(pnl, 2)} ({round(pnl_pct, 2)}%)\n"
-                f"Status: {status}\n\n"
-                "--------------------\n\n"
-            )
-
-        except Exception as e:
-            msg += f"{row.get('Symbol', 'UNKNOWN')} monitor error: {e}\n\n"
-
-    journal.to_csv(TRADE_FILE, index=False)
-
-    return msg
-
-
 def save_reports(scanner, final):
     today = datetime.now().strftime("%Y%m%d")
 
@@ -537,25 +494,19 @@ def save_reports(scanner, final):
     if not final.empty:
         final.to_csv(f"signals_{today}.csv", index=False)
 
-    journal = load_trade_journal()
-    journal.to_csv(f"trade_journal_{today}.csv", index=False)
-
     print("Reports saved")
 
 
 def main():
-    scanner, final = run_scanner()
+    broker_holdings, raw_holdings = get_broker_holdings()
+
+    scanner, final = run_scanner(exclude_symbols=broker_holdings)
 
     print("Stocks analyzed:", len(scanner))
     print("Signals found:", len(final))
 
-    signal_message = format_signals(final)
+    signal_message = format_signals(final, broker_holdings)
     send_telegram(signal_message)
-
-    update_trade_journal(final)
-
-    portfolio_message = portfolio_monitor()
-    send_telegram(portfolio_message)
 
     save_reports(scanner, final)
 
