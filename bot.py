@@ -20,6 +20,7 @@ MAX_ALLOCATION = 0.30
 MIN_SCORE = 65
 
 NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+TRADE_FILE = "trade_journal.csv"
 
 
 def send_telegram(message):
@@ -29,16 +30,12 @@ def send_telegram(message):
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    response = requests.post(url, json=payload, timeout=30)
 
-    r = requests.post(url, json=payload, timeout=30)
-
-    print("Telegram status:", r.status_code)
-    print(r.text[:300])
+    print("Telegram status:", response.status_code)
+    print(response.text[:300])
 
 
 def clean_data(df):
@@ -99,13 +96,13 @@ def add_indicators(df):
         low = df["Low"].squeeze()
         volume = df["Volume"].squeeze()
 
-        df["EMA20"] = EMAIndicator(close, window=20).ema_indicator()
-        df["EMA50"] = EMAIndicator(close, window=50).ema_indicator()
-        df["EMA200"] = EMAIndicator(close, window=200).ema_indicator()
+        df["EMA20"] = EMAIndicator(close=close, window=20).ema_indicator()
+        df["EMA50"] = EMAIndicator(close=close, window=50).ema_indicator()
+        df["EMA200"] = EMAIndicator(close=close, window=200).ema_indicator()
 
-        df["RSI"] = RSIIndicator(close, window=14).rsi()
+        df["RSI"] = RSIIndicator(close=close, window=14).rsi()
 
-        macd = MACD(close)
+        macd = MACD(close=close)
         df["MACD"] = macd.macd()
         df["MACD_SIGNAL"] = macd.macd_signal()
 
@@ -179,12 +176,12 @@ def weekly_trend(symbol):
         close = weekly["Close"].squeeze()
 
         weekly["EMA20"] = EMAIndicator(
-            close,
+            close=close,
             window=20
         ).ema_indicator()
 
         weekly["EMA50"] = EMAIndicator(
-            close,
+            close=close,
             window=50
         ).ema_indicator()
 
@@ -403,38 +400,43 @@ def format_signals(final):
     return msg
 
 
-def save_reports(scanner, final):
-    today = datetime.now().strftime("%Y%m%d")
+def load_trade_journal():
+    if os.path.exists(TRADE_FILE):
+        return pd.read_csv(TRADE_FILE)
 
-    if not scanner.empty:
-        scanner.to_csv(f"scanner_{today}.csv", index=False)
+    journal = pd.DataFrame(columns=[
+        "Date",
+        "Symbol",
+        "Buy Price",
+        "Quantity",
+        "Stop Loss",
+        "Target",
+        "Status",
+        "Exit Price",
+        "PnL"
+    ])
 
-    if not final.empty:
-        final.to_csv(f"signals_{today}.csv", index=False)
+    journal.to_csv(TRADE_FILE, index=False)
+    return journal
 
-    print("Reports saved")
-TRADE_FILE = "trade_journal.csv"
 
 def update_trade_journal(final):
+    journal = load_trade_journal()
 
     if final.empty:
+        journal.to_csv(TRADE_FILE, index=False)
         return
 
-    if os.path.exists(TRADE_FILE):
-        journal = pd.read_csv(TRADE_FILE)
+    if journal.empty:
+        open_symbols = []
     else:
-        journal = pd.DataFrame(columns=[
-            "Date","Symbol","Buy Price","Quantity",
-            "Stop Loss","Target","Status",
-            "Exit Price","PnL"
-        ])
-
-    for _, row in final.iterrows():
-
         open_symbols = journal[
-            journal["Status"]=="Open"
+            journal["Status"] == "Open"
         ]["Symbol"].tolist()
 
+    added = 0
+
+    for _, row in final.iterrows():
         if row["Symbol"] in open_symbols:
             continue
 
@@ -450,17 +452,110 @@ def update_trade_journal(final):
             ""
         ]
 
-    journal.to_csv(TRADE_FILE,index=False)
-    def main():
+        added += 1
+
+    journal.to_csv(TRADE_FILE, index=False)
+
+    print("Trades added to journal:", added)
+
+
+def portfolio_monitor():
+    journal = load_trade_journal()
+
+    if journal.empty:
+        return "📊 PORTFOLIO UPDATE\n\nNo open trades."
+
+    open_trades = journal[journal["Status"] == "Open"].copy()
+
+    if open_trades.empty:
+        return "📊 PORTFOLIO UPDATE\n\nNo open trades."
+
+    msg = "📊 PORTFOLIO UPDATE\n\n"
+
+    for idx, row in open_trades.iterrows():
+        try:
+            symbol = row["Symbol"]
+            entry = float(row["Buy Price"])
+            qty = int(row["Quantity"])
+            stop = float(row["Stop Loss"])
+            target = float(row["Target"])
+
+            df = download_stock(symbol)
+
+            if df is None or df.empty:
+                continue
+
+            current = float(df["Close"].iloc[-1])
+            pnl = (current - entry) * qty
+            pnl_pct = ((current - entry) / entry) * 100
+            halfway = entry + ((target - entry) / 2)
+
+            if current >= target:
+                status = "🎯 TARGET HIT - Book Profit"
+                journal.loc[idx, "Status"] = "Closed"
+                journal.loc[idx, "Exit Price"] = target
+                journal.loc[idx, "PnL"] = round((target - entry) * qty, 2)
+
+            elif current <= stop:
+                status = "🛑 STOP LOSS HIT - Exit"
+                journal.loc[idx, "Status"] = "Closed"
+                journal.loc[idx, "Exit Price"] = stop
+                journal.loc[idx, "PnL"] = round((stop - entry) * qty, 2)
+
+            elif current >= halfway:
+                status = "🔁 HOLD - Move SL to breakeven"
+
+            else:
+                status = "⏳ HOLD"
+
+            msg += (
+                f"{symbol}\n"
+                f"Entry: ₹{entry}\n"
+                f"Current: ₹{round(current, 2)}\n"
+                f"Target: ₹{target}\n"
+                f"SL: ₹{stop}\n"
+                f"Qty: {qty}\n"
+                f"P/L: ₹{round(pnl, 2)} ({round(pnl_pct, 2)}%)\n"
+                f"Status: {status}\n\n"
+                "--------------------\n\n"
+            )
+
+        except Exception as e:
+            msg += f"{row.get('Symbol', 'UNKNOWN')} monitor error: {e}\n\n"
+
+    journal.to_csv(TRADE_FILE, index=False)
+
+    return msg
+
+
+def save_reports(scanner, final):
+    today = datetime.now().strftime("%Y%m%d")
+
+    if not scanner.empty:
+        scanner.to_csv(f"scanner_{today}.csv", index=False)
+
+    if not final.empty:
+        final.to_csv(f"signals_{today}.csv", index=False)
+
+    journal = load_trade_journal()
+    journal.to_csv(f"trade_journal_{today}.csv", index=False)
+
+    print("Reports saved")
+
+
+def main():
     scanner, final = run_scanner()
 
     print("Stocks analyzed:", len(scanner))
     print("Signals found:", len(final))
 
-    message = format_signals(final)
-    send_telegram(message)
+    signal_message = format_signals(final)
+    send_telegram(signal_message)
 
     update_trade_journal(final)
+
+    portfolio_message = portfolio_monitor()
+    send_telegram(portfolio_message)
 
     save_reports(scanner, final)
 
