@@ -413,7 +413,44 @@ def save_reports(scanner, final):
         final.to_csv(f"signals_{today}.csv", index=False)
 
     print("Reports saved")
+TRADE_FILE = "trade_journal.csv"
 
+def update_trade_journal(final):
+
+    if final.empty:
+        return
+
+    if os.path.exists(TRADE_FILE):
+        journal = pd.read_csv(TRADE_FILE)
+    else:
+        journal = pd.DataFrame(columns=[
+            "Date","Symbol","Buy Price","Quantity",
+            "Stop Loss","Target","Status",
+            "Exit Price","PnL"
+        ])
+
+    for _, row in final.iterrows():
+
+        open_symbols = journal[
+            journal["Status"]=="Open"
+        ]["Symbol"].tolist()
+
+        if row["Symbol"] in open_symbols:
+            continue
+
+        journal.loc[len(journal)] = [
+            datetime.now().strftime("%Y-%m-%d"),
+            row["Symbol"],
+            row["Entry"],
+            row["Quantity"],
+            row["Stop Loss"],
+            row["Target"],
+            "Open",
+            "",
+            ""
+        ]
+
+    journal.to_csv(TRADE_FILE,index=False)
 
 def main():
     scanner, final = run_scanner()
