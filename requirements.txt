@@ -1,0 +1,6 @@
+yfinance
+ta
+pandas
+numpy
+requests
+openpyxl
