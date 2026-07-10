@@ -2,7 +2,7 @@ name: Nifty500 Swing Bot
 
 on:
   schedule:
-    - cron: "00 13 * * 1-5"
+   - cron: "37 14 * * 1-5"
   workflow_dispatch:
 
 jobs:
